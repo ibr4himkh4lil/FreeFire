@@ -22,82 +22,66 @@ import time
 
 app = Flask(__name__)
 
-# ✅ FIX: প্রতিটি region-এর জন্য আলাদা token dictionary
 jwt_tokens = {"IND": None, "BD": None, "PK": None}
 jwt_lock = threading.Lock()
 updater_started = {"IND": False, "BD": False, "PK": False}
 
+JWT_ENDPOINTS = {
+    "IND": "https://raihan-access-to-jwt.vercel.app/token?uid=4344656844&password=RAIHANHACKER01",
+    "BD":  "https://raihan-access-to-jwt.vercel.app/token?uid=4363457346&password=SENKU_692491",
+    "PK":  "https://raihan-access-to-jwt.vercel.app/token?uid=4363456802&password=SENKU_692458",
+}
+
 # ---------------- JWT HANDLING ----------------
 def extract_token_from_response(data, region):
-    """Safely extract JWT token from API response."""
     if not isinstance(data, dict):
         return None
-    
-    # New API format
     if data.get("success") is True and "token" in data:
         return data["token"]
-    
-    # Fallback for older formats
-    if region == "IND":
-        if data.get('status') in ['success', 'live']:
-            return data.get('token')
-    elif region in ["BD", "PK"]:
-        if 'token' in data:
-            return data['token']
-    
+    if "token" in data:
+        return data["token"]
     return None
 
 def get_jwt_token_sync(region):
-    """Fetch JWT token synchronously for a region."""
-    # Only PK, IND and BD servers supported
-    endpoints = {
-        "IND": "https://raihan-access-to-jwt.vercel.app/token?uid=4344656844&password=RAIHANHACKER01",
-        "BD":  "https://raihan-access-to-jwt.vercel.app/token?uid=4363457346&password=SENKU_692491",
-        "PK":  "https://raihan-access-to-jwt.vercel.app/token?uid=4363456802&password=SENKU_692458",
-    }
-
-    if region not in endpoints:
+    if region not in JWT_ENDPOINTS:
         region = "IND"
-
-    url = endpoints[region]
-
-    with jwt_lock:
-        try:
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-            token = extract_token_from_response(data, region)
-            if token:
-                # ✅ FIX: region-specific dict-এ save করো
-                jwt_tokens[region] = token
-                print(f"[JWT] Token for {region} updated: {token[:50]}...")
-                return token
-            else:
-                print(f"[JWT] Failed to extract token from response for {region}")
-        except Exception as e:
-            print(f"[JWT] Request error for {region}: {e}")
+    url = JWT_ENDPOINTS[region]
+    try:
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        token = extract_token_from_response(data, region)
+        if token:
+            jwt_tokens[region] = token
+            print(f"[JWT] Token for {region} updated: {token[:30]}...")
+            return token
+        else:
+            print(f"[JWT] No token in response for {region}: {data}")
+    except Exception as e:
+        print(f"[JWT] Error for {region}: {e}")
     return None
 
 def ensure_jwt_token_sync(region):
-    """Ensure JWT token is available for the given region; fetch if missing."""
-    # ✅ FIX: region-specific token check করো
     if not jwt_tokens.get(region):
-        print(f"[JWT] Token missing for {region}. Fetching...")
         return get_jwt_token_sync(region)
     return jwt_tokens[region]
 
 def jwt_token_updater(region):
-    """Background thread to refresh JWT every 5 minutes for a specific region."""
     while True:
-        get_jwt_token_sync(region)
         time.sleep(300)
+        get_jwt_token_sync(region)
 
 def start_updater_once(region):
-    """Start background token updater only once per region."""
     if not updater_started.get(region):
         updater_started[region] = True
         threading.Thread(target=jwt_token_updater, args=(region,), daemon=True).start()
-        print(f"[JWT] Background updater started for {region}")
+
+# ✅ CRITICAL FIX: Module level — runs with Gunicorn too
+print("[STARTUP] Fetching JWT tokens for all regions...")
+for _r in ["IND", "BD", "PK"]:
+    get_jwt_token_sync(_r)
+    start_updater_once(_r)
+print("[STARTUP] Done.")
 
 # ---------------- API ENDPOINTS ----------------
 def get_api_endpoint(region):
@@ -122,7 +106,6 @@ def encrypt_aes(hex_data, key, iv):
 
 # ---------------- API CALL ----------------
 def apis(idd, region):
-    # ✅ region অনুযায়ী সঠিক token নেবে
     token = ensure_jwt_token_sync(region)
     if not token:
         raise Exception(f"Failed to get JWT token for region {region}")
@@ -135,13 +118,12 @@ def apis(idd, region):
         'Authorization':  f'Bearer {token}',
         'X-Unity-Version':'2018.4.11f1',
         'X-GA':           'v1 1',
-        'ReleaseVersion': 'OB51',
+        'ReleaseVersion': 'OB53',
         'Content-Type':   'application/x-www-form-urlencoded',
     }
-
     try:
         data = bytes.fromhex(idd)
-        response = requests.post(endpoint, headers=headers, data=data, timeout=10)
+        response = requests.post(endpoint, headers=headers, data=data, timeout=15)
         response.raise_for_status()
         return response.content.hex()
     except requests.exceptions.RequestException as e:
@@ -164,25 +146,20 @@ def get_player_info():
                 "error": f"Region '{region}' not supported. Only {', '.join(supported_regions)} are supported."
             }), 400
 
-        # ✅ FIX: প্রতিটি region-এর updater একবারই start হবে
         start_updater_once(region)
 
-        # Generate protobuf
         message = uid_generator_pb2.uid_generator()
         message.saturn_ = int(uid)
         message.garena  = 1
         protobuf_data = message.SerializeToString()
         hex_data = binascii.hexlify(protobuf_data).decode()
 
-        # Encrypt
         encrypted_hex = encrypt_aes(hex_data, default_key, default_iv)
 
-        # Call API
         api_response = apis(encrypted_hex, region)
         if not api_response:
             return jsonify({"error": "Empty response from API"}), 400
 
-        # Parse response
         message = AccountPersonalShowInfo()
         message.ParseFromString(bytes.fromhex(api_response))
         result = MessageToDict(message)
@@ -193,8 +170,16 @@ def get_player_info():
     except ValueError:
         return jsonify({"error": "Invalid UID format"}), 400
     except Exception as e:
-        print(f"[ERROR] Processing request: {e}")
+        print(f"[ERROR] {e}")
         return jsonify({"error": f"Failure to process the data: {str(e)}"}), 500
+
+@app.route('/token-status', methods=['GET'])
+def token_status():
+    """Debug: check which tokens are loaded"""
+    return jsonify({
+        r: "OK" if jwt_tokens.get(r) else "MISSING"
+        for r in ["IND", "BD", "PK"]
+    })
 
 @app.route('/favicon.ico')
 def favicon():
@@ -209,10 +194,5 @@ def index():
         "example":           "/info?uid=12345678&region=IND"
     })
 
-# ---------------- MAIN ----------------
 if __name__ == "__main__":
-    # ✅ Startup-এ তিনটি region-এর token আগেই fetch করো
-    for r in ["IND", "BD", "PK"]:
-        ensure_jwt_token_sync(r)
-        start_updater_once(r)
     app.run(host="0.0.0.0", port=5000)
